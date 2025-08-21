@@ -1,26 +1,56 @@
+import os
 import streamlit as st
 import requests
 import pandas as pd
 from datetime import date
 from dateutil.relativedelta import relativedelta
 
-# ✅ Streamlit Community Cloud / Local: read secrets from st.secrets
-# Put these in Streamlit Cloud: Settings → Secrets
-# [naver]
-# client_id = "YOUR_CLIENT_ID"
-# client_secret = "YOUR_CLIENT_SECRET"
-NAVER_CLIENT_ID = st.secrets["naver"]["client_id"]
-NAVER_CLIENT_SECRET = st.secrets["naver"]["client_secret"]
+st.set_page_config(page_title="Naver 키워드 트렌드 & 요약", layout="wide")
+
+# -------------------------------
+# Secrets / Credentials Handling
+# -------------------------------
+def get_credentials():
+    # 1) Try Streamlit Secrets
+    naver = st.secrets.get("naver", {})
+    cid = naver.get("client_id")
+    csec = naver.get("client_secret")
+
+    # 2) Fallback to environment variables
+    if not cid:
+        cid = os.environ.get("NAVER_CLIENT_ID")
+    if not csec:
+        csec = os.environ.get("NAVER_CLIENT_SECRET")
+
+    # 3) As a last resort, allow user input (session-only; not persisted)
+    with st.sidebar:
+        st.markdown("### 🔐 자격 증명")
+        if not cid:
+            cid = st.text_input("Client ID (임시 입력)", type="password")
+        if not csec:
+            csec = st.text_input("Client Secret (임시 입력)", type="password")
+
+        if cid and csec:
+            st.caption("✅ 자격 증명이 설정되었습니다.")
+        else:
+            st.warning("Client ID/Secret이 설정되지 않았습니다. Streamlit Cloud에서는 **Settings → Secrets**에 입력하세요.\n"
+                       "로컬에선 `.streamlit/secrets.toml` 또는 환경변수로 설정할 수 있습니다.")
+
+    return cid, csec
+
+NAVER_CLIENT_ID, NAVER_CLIENT_SECRET = get_credentials()
 
 def naver_headers():
     return {
-        "X-Naver-Client-Id": NAVER_CLIENT_ID,
-        "X-Naver-Client-Secret": NAVER_CLIENT_SECRET,
+        "X-Naver-Client-Id": NAVER_CLIENT_ID or "",
+        "X-Naver-Client-Secret": NAVER_CLIENT_SECRET or "",
         "Content-Type": "application/json; charset=UTF-8",
     }
 
+# -------------------------------
+# API Helpers
+# -------------------------------
 def fetch_trend(start_date, end_date, keywords, time_unit="week", device=None, gender=None, ages=None):
-    """Call Naver DataLab Search API for keyword trend data."""
     url = "https://openapi.naver.com/v1/datalab/search"
     groups = [{"groupName": kw, "keywords": [kw]} for kw in keywords][:5]  # DataLab max 5 groups
     payload = {
@@ -34,21 +64,23 @@ def fetch_trend(start_date, end_date, keywords, time_unit="week", device=None, g
     if ages:   payload["ages"] = ages
 
     r = requests.post(url, headers=naver_headers(), json=payload, timeout=20)
+    if r.status_code == 401 or r.status_code == 403:
+        raise RuntimeError("인증 오류(401/403). Client ID/Secret을 확인하세요.")
     r.raise_for_status()
     return r.json()
 
 def fetch_news_snippets(query, display=5, sort="date"):
-    """Call Naver Search API (news) for short previews."""
     url = "https://openapi.naver.com/v1/search/news.json"
     params = {"query": query, "display": display, "sort": sort}
-    r = requests.get(url, headers={
-        "X-Naver-Client-Id": NAVER_CLIENT_ID,
-        "X-Naver-Client-Secret": NAVER_CLIENT_SECRET,
-    }, params=params, timeout=20)
+    r = requests.get(url, headers=naver_headers(), params=params, timeout=20)
+    if r.status_code == 401 or r.status_code == 403:
+        raise RuntimeError("인증 오류(401/403). Client ID/Secret을 확인하세요.")
     r.raise_for_status()
     return r.json().get("items", [])
 
-st.set_page_config(page_title="Naver 키워드 트렌드 & 요약", layout="wide")
+# -------------------------------
+# UI: Controls
+# -------------------------------
 st.title("네이버 키워드 트렌드 순위 & 핵심 요약")
 
 with st.sidebar:
@@ -63,16 +95,28 @@ with st.sidebar:
     keywords_text = st.text_area("키워드(쉼표로 구분, 최대 5개)", "아이폰, 갤럭시, 에어팟, 무선이어폰, 폴더블폰")
     run = st.button("조회")
 
+# Block running if credentials missing
+if run and (not NAVER_CLIENT_ID or not NAVER_CLIENT_SECRET):
+    st.error("Client ID/Secret이 필요합니다. 사이드바 또는 Secrets에 입력하세요.")
+    st.stop()
+
+# -------------------------------
+# Main Action
+# -------------------------------
 if run:
     keywords = [k.strip() for k in keywords_text.split(",") if k.strip()]
     if not keywords:
         st.warning("키워드를 1개 이상 입력하세요.")
         st.stop()
 
-    with st.spinner("검색 트렌드 불러오는 중..."):
-        trend = fetch_trend(start, end, keywords, time_unit, device or None, gender or None, ages or None)
+    try:
+        with st.spinner("검색 트렌드 불러오는 중..."):
+            trend = fetch_trend(start, end, keywords, time_unit, device or None, gender or None, ages or None)
+    except Exception as e:
+        st.error(f"트렌드 API 호출 실패: {e}")
+        st.stop()
 
-    # Build ranking table from trend ratios
+    # Build ranking table
     rows = []
     for res in trend.get("results", []):
         title = res["title"]
@@ -97,7 +141,11 @@ if run:
     for i, kw in enumerate(rank_df["키워드"].tolist()):
         with cols[i % 2]:
             st.markdown(f"### 🔎 {kw}")
-            news = fetch_news_snippets(kw, display=5, sort="date")
+            try:
+                news = fetch_news_snippets(kw, display=5, sort="date")
+            except Exception as e:
+                st.warning(f"뉴스 API 호출 실패({kw}): {e}")
+                news = []
             if not news:
                 st.write("관련 뉴스가 없습니다.")
             for item in news:
@@ -105,5 +153,4 @@ if run:
                 title = item.get("title", "").replace("<b>", "").replace("</b>", "")
                 link = item.get("link", "")
                 desc = item.get("description", "").replace("<b>", "").replace("</b>", "")
-                # ✅ IMPORTANT: use \n inside f-string instead of raw newlines
                 st.markdown(f"- [{title}]({link})  \n{desc}")
