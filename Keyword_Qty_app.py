@@ -11,12 +11,12 @@ st.set_page_config(page_title="Naver 키워드 트렌드 & 요약", layout="wide
 # Secrets / Credentials Handling
 # -------------------------------
 def get_credentials():
-    # 1) Try Streamlit Secrets
+    # 1) Try Streamlit Secrets (safe access to avoid KeyError)
     naver = st.secrets.get("naver", {})
     cid = naver.get("client_id")
     csec = naver.get("client_secret")
 
-    # 2) Fallback to environment variables
+    # 2) Fallback to environment variables (optional)
     if not cid:
         cid = os.environ.get("NAVER_CLIENT_ID")
     if not csec:
@@ -33,8 +33,13 @@ def get_credentials():
         if cid and csec:
             st.caption("✅ 자격 증명이 설정되었습니다.")
         else:
-            st.warning("Client ID/Secret이 설정되지 않았습니다. Streamlit Cloud에서는 **Settings → Secrets**에 입력하세요.\n"
-                       "로컬에선 `.streamlit/secrets.toml` 또는 환경변수로 설정할 수 있습니다.")
+            st.warning(
+                "Client ID/Secret이 설정되지 않았습니다.\n"
+                "- Streamlit Cloud: **⋯ → Settings → Secrets**에서 아래 형식으로 저장하세요.\n"
+                "```toml\n[naver]\nclient_id = \"YOUR_CLIENT_ID\"\nclient_secret = \"YOUR_CLIENT_SECRET\"\n```\n"
+                "- 로컬: `.streamlit/secrets.toml` 파일에 같은 형식으로 저장하거나,\n"
+                "  환경변수 NAVER_CLIENT_ID / NAVER_CLIENT_SECRET를 사용하세요."
+            )
 
     return cid, csec
 
@@ -64,7 +69,7 @@ def fetch_trend(start_date, end_date, keywords, time_unit="week", device=None, g
     if ages:   payload["ages"] = ages
 
     r = requests.post(url, headers=naver_headers(), json=payload, timeout=20)
-    if r.status_code == 401 or r.status_code == 403:
+    if r.status_code in (401, 403):
         raise RuntimeError("인증 오류(401/403). Client ID/Secret을 확인하세요.")
     r.raise_for_status()
     return r.json()
@@ -73,7 +78,7 @@ def fetch_news_snippets(query, display=5, sort="date"):
     url = "https://openapi.naver.com/v1/search/news.json"
     params = {"query": query, "display": display, "sort": sort}
     r = requests.get(url, headers=naver_headers(), params=params, timeout=20)
-    if r.status_code == 401 or r.status_code == 403:
+    if r.status_code in (401, 403):
         raise RuntimeError("인증 오류(401/403). Client ID/Secret을 확인하세요.")
     r.raise_for_status()
     return r.json().get("items", [])
